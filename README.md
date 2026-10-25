@@ -58,21 +58,23 @@ https://raw.githubusercontent.com/halo798/surge-ipcheck/main/IPCheck-Mac.sgmodul
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `POLICY` | 空 | 落地检测走的策略或策略组名称。留空时按规则分流，和日常上网一致 |
+| `POLICY` | `auto` | 落地检测走的策略或策略组名称。`auto` 表示按规则分流，和日常上网一致 |
 | `TIMEOUT` | `6` | 单个请求的超时秒数 |
 | `CACHE` | `1800` | 落地 IP 质量结果的缓存秒数；落地 IP 一变就重新查询。设为 `0` 不缓存 |
 | `MASK` | `0` | 设为 `1` 时隐藏 IP 后两段，方便截图 |
 | `IPV6` | `0` | 设为 `1` 时同时检测 IPv6 落地 |
 | `NOTIFY` | `0` | 设为 `1` 时网络切换后发通知 |
-| `IPQS_KEY` | 空 | [IPQualityScore](https://www.ipqualityscore.com/) 的 Key |
-| `ABUSEIPDB_KEY` | 空 | [AbuseIPDB](https://www.abuseipdb.com/) 的 Key |
-| `IPAPI_KEY` | 空 | [ipapi.is](https://ipapi.is/) 的 Key（不带 Key 时它不返回检测项，所以没 Key 就不查） |
-| `IPREGISTRY_KEY` | 空 | [ipregistry](https://ipregistry.co/) 的 Key |
-| `IPDATA_KEY` | 空 | [ipdata](https://ipdata.co/) 的 Key |
-| `IP2LOCATION_KEY` | 空 | [IP2Location.io](https://www.ip2location.io/) 的 Key，用于提高额度；付费套餐另有使用类型和欺诈分 |
-| `PROXYCHECK_KEY` | 空 | [proxycheck.io](https://proxycheck.io/) 的 Key，用于提高额度 |
+| `IPQS_KEY` | `none` | [IPQualityScore](https://www.ipqualityscore.com/) 的 Key |
+| `ABUSEIPDB_KEY` | `none` | [AbuseIPDB](https://www.abuseipdb.com/) 的 Key |
+| `IPAPI_KEY` | `none` | [ipapi.is](https://ipapi.is/) 的 Key（不带 Key 时它不返回检测项，所以没 Key 就不查） |
+| `IPREGISTRY_KEY` | `none` | [ipregistry](https://ipregistry.co/) 的 Key |
+| `IPDATA_KEY` | `none` | [ipdata](https://ipdata.co/) 的 Key |
+| `IP2LOCATION_KEY` | `none` | [IP2Location.io](https://www.ip2location.io/) 的 Key，用于提高额度；付费套餐另有使用类型和欺诈分 |
+| `PROXYCHECK_KEY` | `none` | [proxycheck.io](https://proxycheck.io/) 的 Key，用于提高额度 |
 
-各家都有免费套餐，注册后就能拿到 Key。Key 只保存在你本机的 Surge 配置里。
+Key 参数保持 `none` 就是不填。各家都有免费套餐，注册后就能拿到 Key。Key 只保存在你本机的 Surge 配置里。
+
+> Surge 不接受冒号后为空的参数默认值（会报「模块头部的参数声明格式错误」），所以这里用 `auto` 和 `none` 占位，脚本会把它们当作未填写。
 
 ## 数据来源
 
@@ -117,6 +119,12 @@ https://raw.githubusercontent.com/halo798/surge-ipcheck/main/IPCheck-Mac.sgmodul
 
 ```bash
 node --test test/test.js
+```
+
+用 Surge Mac 自带的离线语言服务器检查两个模块文件，包括头部的参数声明（不需要 Surge 在运行）：
+
+```bash
+node test/check-modules.js
 ```
 
 在 Surge Mac 上直接运行脚本（需要 Surge 正在运行）：
