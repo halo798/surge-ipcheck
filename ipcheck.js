@@ -24,6 +24,8 @@ const OPT = {
   policy: ARG.policy || '',
   timeout: clampNum(ARG.timeout, 6, 2, 30),
   cache: clampNum(ARG.cache, 1800, 0, 86400),
+  // 本地 IP 与位置默认显示；LOCAL=0 时面板、通知、报告都不显示，也不去查询
+  showLocal: !/^(0|false|no|off|hide)$/i.test(ARG.local || ''),
   mask: isOn(ARG.mask),
   ipv6: isOn(ARG.ipv6),
   notify: isOn(ARG.notify),
@@ -194,15 +196,27 @@ function trimPlace(s) {
   return String(s || '').replace(/(省|市|特别行政区|自治区|壮族|回族|维吾尔)$/g, '');
 }
 
-// 面板用的短地址：国旗 + 省/州 + 城市（同名只留一个）
-function placeShort(g) {
+// 面板用的位置：国内显示省市，国外显示国家和省/州
+function placePanel(g) {
   if (!g) return '';
+  const cc = String(g.cc || '').toUpperCase();
+  const country = g.country || ccName(cc);
   const parts = [];
-  [g.region, g.city].forEach(p => {
-    if (p && !parts.some(x => trimPlace(x) === trimPlace(p)) && trimPlace(p) !== trimPlace(g.country)) parts.push(p);
+  (cc === 'CN' ? [g.region, g.city] : [country, g.region]).forEach(p => {
+    if (p && !parts.some(x => trimPlace(x) === trimPlace(p))) parts.push(p);
   });
-  if (!parts.length) parts.push(g.country || ccName(g.cc));
-  return [flag(g.cc), parts.join(' ')].filter(Boolean).join(' ');
+  if (!parts.length && country) parts.push(country);
+  return parts.join(' ');
+}
+
+// 面板用的运营商简称：国内去掉“中国”前缀，英文名去掉公司后缀，最多两个词
+function ispShort(g) {
+  const name = ispName(g);
+  if (/[一-龥]/.test(name)) return name.replace(/^中国(?=移动|联通|电信|广电|铁通|教育网|科技网)/, '');
+  const drop = /^(inc|llc|ltd|limited|co|corp|corporation|company|communications?|online|holdings?|group|gmbh|ag|sa|bv|plc|pty|services?|technolog(y|ies))$/i;
+  const words = name.replace(/[,.]/g, ' ').split(/\s+/).filter(Boolean);
+  while (words.length > 1 && drop.test(words[words.length - 1])) words.pop();
+  return words.slice(0, 2).join(' ').slice(0, 20);
 }
 
 // 报告用的完整地址：国家 + 省/州 + 城市
@@ -876,11 +890,11 @@ function ipApiRec(probe) {
 
 async function detect(opts) {
   opts = opts || {};
-  const R = { ts: START, version: VERSION, env: envInfo(), net: netInfo(), policyArg: OPT.policy, mask: OPT.mask };
+  const R = { ts: START, version: VERSION, env: envInfo(), net: OPT.showLocal ? netInfo() : { hidden: true }, policyArg: OPT.policy, mask: OPT.mask };
 
   // 第一轮：本地（直连）与落地（代理）同时查
   const [local, probes, v6] = await Promise.all([
-    detectLocal(),
+    OPT.showLocal ? detectLocal() : Promise.resolve({ hidden: true }),
     Promise.all(PROBES.map(p => runProbe(p))),
     OPT.ipv6 ? detectV6() : Promise.resolve(null),
   ]);
@@ -951,19 +965,25 @@ async function detect(opts) {
 
 /* ───────────────────────── 文本输出 ───────────────────────── */
 
-function geoLine(g) {
+const SP = '　'; // 全角空格：面板里标签与各段之间用它分隔，两字标签刚好对齐
+const BLANK = SP + SP; // 同一类的第二行起不再重复标签
+
+// 面板的一行：标签　IP　位置 · 运营商
+function hopLine(label, g) {
   if (!g) return '';
-  if (g.private) return `${showIP(g.ip)} 内网/本机代理`;
-  return [showIP(g.ip), placeShort(g), ispName(g)].filter(Boolean).join(' ');
+  if (g.private) return [label, showIP(g.ip), '内网/本机代理'].join(SP);
+  const tail = [placePanel(g), ispShort(g)].filter(Boolean).join(' · ');
+  return [label, showIP(g.ip), tail].filter(Boolean).join(SP);
 }
 
-function execText(R) {
+// withRule：报告里带上匹配到的规则，面板只显示策略路径
+function execText(R, withRule) {
   const e = R.exec || {};
   if (!R.apiOK) return '无法读取（需 Surge 的 $httpAPI）';
-  if (e.direct) return `${e.rule ? e.rule + ' ➜ ' : ''}DIRECT（未经代理）`;
+  if (e.direct) return `${withRule && e.rule ? e.rule + ' ➜ ' : ''}DIRECT（未经代理）`;
   const path = (e.path && e.path.length ? e.path.slice() : [R.policyArg].filter(Boolean));
   if (e.node && path[path.length - 1] !== e.node) path.push(e.node);
-  const head = R.policyArg ? '指定' : e.rule;
+  const head = withRule ? (R.policyArg ? '指定' : e.rule) : '';
   const s = [head].concat(path).filter(Boolean).join(' ➜ ');
   return (s || e.node || '未知') + (e.nodes.length > 1 ? `（共 ${e.nodes.length} 个节点）` : '');
 }
@@ -984,35 +1004,34 @@ function factorText(q) {
   const hits = FACTORS.filter(([k]) => q.factors[k].hit > 0).map(([k, n]) => `${n} ${q.factors[k].hit}/${q.factors[k].total}`);
   if (hits.length) return hits.join(' · ');
   const n = q.sources.filter(s => s.ok && Object.values(s.f).some(v => typeof v === 'boolean')).length;
-  return `代理/VPN/Tor/机房/滥用/机器人 均未命中（${n} 库）`;
+  return `${n} 库均未命中`;
 }
 
+// 面板与通知的正文：每段一行，标签两个字，信息精简；完整内容看网页报告
 function lines(R) {
   const L = [];
-  const n = R.net || {};
-  const netDesc = n.type === '蜂窝' ? `蜂窝 ${[n.carrier, n.radio].filter(Boolean).join(' ')}` : n.type === 'Wi-Fi' ? 'Wi-Fi' : '';
-  L.push(`本地：${R.local && R.local.ip ? geoLine(R.local) : R.local && R.local.error || '未知'}${netDesc ? ' · ' + netDesc : ''}`);
-  if (!R.apiOK) L.push('入口：无法读取');
-  else if (!R.entries.length) L.push(R.exec.direct ? '入口：无（直连，未经代理）' : '入口：未找到代理请求');
-  R.entries.forEach((e, i) => {
-    const more = i === 0 && R.candidates.length ? `（DNS 另有 ${R.candidates.length} 个）` : '';
-    L.push(`${i ? '入口' + (i + 1) : '入口'}：${geoLine(e)}${more}`);
-  });
+  if (!(R.local && R.local.hidden)) L.push(R.local && R.local.ip ? hopLine('本地', R.local) : `本地${SP}${(R.local && R.local.error) || '未知'}`);
+  if (!R.apiOK) L.push(`入口${SP}无法读取`);
+  else if (!R.entries.length) L.push(`入口${SP}${R.exec.direct ? '无（直连，未经代理）' : '未找到代理请求'}`);
+  R.entries.forEach((e, i) => L.push(hopLine(i ? BLANK : '入口', e)));
+  if (R.candidates.length) L.push(`${BLANK}${SP}DNS 另有 ${R.candidates.length} 个备选地址`);
   if (R.landing) {
-    L.push(`落地：${geoLine(R.landing)}`);
-    R.landingAlt.forEach((g, i) => L.push(`落地${i + 2}：${geoLine(g)}`));
+    L.push(hopLine('落地', R.landing));
+    R.landingAlt.forEach(g => L.push(hopLine(BLANK, g)));
   } else {
-    L.push('落地：检测失败');
+    L.push(`落地${SP}检测失败`);
   }
-  if (R.v6) L.push(`IPv6：${R.v6.ip ? geoLine(R.v6) : '无（' + R.v6.error.slice(0, 24) + '）'}`);
-  L.push(`执行：${execText(R)}`);
+  if (R.v6) L.push(R.v6.ip ? hopLine(BLANK, R.v6) : `${BLANK}${SP}IPv6 无（${R.v6.error.slice(0, 20)}）`);
+  L.push(`策略${SP}${execText(R)}`);
   const q = R.quality;
+  const stamp = [clock(R.ts).slice(0, 5), secs(R.ms), q && q.cachedAt ? '缓存' : ''].filter(Boolean).join(' · ');
   if (q) {
-    const reg = q.reg ? `注册 ${q.reg.cc}` : '注册地未知';
-    L.push(`类型：${q.native}（${reg}/使用 ${q.use.cc || '?'}）· ${usageText(q.usage)}`);
-    const sc = q.risk.scores.map(s => `${s.name} ${s.display}`).join(' · ');
-    L.push(`风险：${riskText(q)}${sc ? ' · ' + sc : ''}`);
-    L.push(`因子：${factorText(q)}`);
+    const sc = q.risk.scores.map(s => `${s.name} ${s.display}`);
+    if (!sc.length) L.push(`评分${SP}暂无`);
+    for (let i = 0; i < sc.length; i += 3) L.push(`${i ? BLANK : '评分'}${SP}${sc.slice(i, i + 3).join(' · ')}`);
+    L.push(`因子${SP}${factorText(q)} · ${stamp}`);
+  } else {
+    L.push(`时间${SP}${stamp}`);
   }
   return L;
 }
@@ -1023,12 +1042,6 @@ function titleText(R) {
   if (!q) return `IP 检测 · ${flag(R.landing.cc)} ${showIP(R.landing.ip)}`;
   const u = q.usage.top ? USAGE_LABEL[q.usage.top] : '类型未知';
   return `${flag(q.use.cc || R.landing.cc)} ${q.native} · ${u} · ${riskText(q)}`;
-}
-
-function footText(R) {
-  const env = R.env;
-  const cached = R.quality && R.quality.cachedAt ? ` · 质量数据缓存于 ${clock(R.quality.cachedAt)}` : '';
-  return `${clock(R.ts)} · 用时 ${secs(R.ms)} · Surge ${env.system} ${env.version}${cached}`;
 }
 
 function riskColor(level) {
@@ -1071,7 +1084,7 @@ function renderHTML(R) {
   const none = t => `<td class="none">${esc(t)}</td>`;
   const sub = t => `<tr class="sub"><th></th><td>${esc(t)}</td></tr>`;
   const netDesc = [n.type, n.ssid && !OPT.mask ? n.ssid : '', n.carrier, n.radio].filter(Boolean).join(' · ');
-  rows.push(`<tr><th>本地</th>${R.local && R.local.ip ? geoCells(R.local) : none(R.local && R.local.error || '未知')}</tr>`);
+  if (!(R.local && R.local.hidden)) rows.push(`<tr><th>本地</th>${R.local && R.local.ip ? geoCells(R.local) : none(R.local && R.local.error || '未知')}</tr>`);
   if (n.lan) rows.push(`<tr><th>内网</th><td><div class="mono">${esc(showIP(n.lan))}</div><div class="muted">${esc([netDesc || n.iface, n.router ? '网关 ' + showIP(n.router) : ''].filter(Boolean).join(' · '))}</div></td></tr>`);
   if (!R.entries.length) rows.push(`<tr><th>入口</th>${none(R.apiOK ? (R.exec.direct ? '无（直连，未经代理）' : '未找到代理请求') : '无法读取（需 Surge 的 $httpAPI）')}</tr>`);
   R.entries.forEach((e, i) => {
@@ -1084,7 +1097,7 @@ function renderHTML(R) {
   if (R.landing && R.landing.colo) rows.push(sub(`Cloudflare 节点 ${R.landing.colo}${R.landing.warp && R.landing.warp !== 'off' ? ' · WARP ' + R.landing.warp : ''}${R.landing.tz ? ' · 时区 ' + R.landing.tz : ''}`));
   R.landingAlt.forEach((g, i) => rows.push(`<tr><th>落地${i + 2}</th>${geoCells(g)}</tr>`));
   if (R.v6) rows.push(`<tr><th>IPv6</th>${R.v6.ip ? geoCells(R.v6) : none(R.v6.error)}</tr>`);
-  rows.push(`<tr><th>执行</th><td>${esc(execText(R))}</td></tr>`);
+  rows.push(`<tr><th>执行</th><td>${esc(execText(R, true))}</td></tr>`);
   const env = R.env;
   rows.push(sub(`Surge ${env.system} ${env.version}（${env.build}）${env.model ? ' · ' + env.model : ''}`));
 
@@ -1153,9 +1166,11 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin:18px 0 8px}foo
 @media (max-width:520px){.score{grid-template-columns:88px 1fr 52px 64px}.kv th{width:64px}}`;
 
   const title = R.landing ? `IP 检测报告：${showIP(R.landing.ip)}` : 'IP 检测报告';
+  // 报告页上的切换链接保留当前的隐藏设置
+  const href = extra => REPORT_URL + '?' + Object.entries(Object.assign({ mask: OPT.mask ? 1 : 0, local: OPT.showLocal ? 1 : 0 }, extra)).map(([k, v]) => `${k}=${v}`).join('&');
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>IP 检测报告</title><style>${style}</style></head><body><div class="wrap">
 <header><h1>${esc(title)}</h1><p>${esc(dateTime(R.ts))} · 用时 ${esc(secs(R.ms))} · ${esc(titleText(R))}</p>
-<div class="actions"><a href="${REPORT_URL}">刷新</a><a href="${REPORT_URL}?nocache=1">重新查询质量</a><a href="${REPORT_URL}?mask=${OPT.mask ? 0 : 1}">${OPT.mask ? '显示完整 IP' : '隐藏 IP'}</a></div></header>
+<div class="actions"><a href="${href({})}">刷新</a><a href="${href({ nocache: 1 })}">重新查询质量</a><a href="${href({ mask: OPT.mask ? 0 : 1 })}">${OPT.mask ? '显示完整 IP' : '隐藏 IP'}</a><a href="${href({ local: OPT.showLocal ? 0 : 1 })}">${OPT.showLocal ? '隐藏本地' : '显示本地'}</a></div></header>
 ${body}
 <footer>surge-ipcheck v${VERSION} · <a href="${REPO}">${REPO.replace('https://', '')}</a><br>各库结论来自其公开数据，可能互相矛盾；仅供参考。</footer>
 </div></body></html>`;
@@ -1165,15 +1180,16 @@ ${body}
 
 function notify(R) {
   const L = lines(R);
-  const landing = L.find(l => l.startsWith('落地：')) || '';
-  $notification.post(titleText(R), landing.replace(/^落地：/, '落地 '), L.filter(l => l !== landing).join('\n'), { url: REPORT_URL });
+  const g = R.landing;
+  const subtitle = g ? ['落地', showIP(g.ip), [placePanel(g), ispShort(g)].filter(Boolean).join(' · ')].join(SP) : '落地检测失败';
+  $notification.post(titleText(R), subtitle, L.filter(l => !l.startsWith('落地')).join('\n'), { url: REPORT_URL });
 }
 
 async function handlePanel() {
   const isPanel = typeof $input !== 'undefined' && $input && $input.purpose === 'panel';
   try {
     const R = await detect({});
-    const content = lines(R).concat(footText(R)).join('\n');
+    const content = lines(R).join('\n');
     if (!isPanel) {
       console.log('\n' + titleText(R) + '\n' + content);
       notify(R);
@@ -1197,6 +1213,8 @@ async function handleReport() {
   }
   if (query.mask === '1') OPT.mask = true;
   if (query.mask === '0') OPT.mask = false;
+  if (query.local === '1') OPT.showLocal = true;
+  if (query.local === '0') OPT.showLocal = false;
   try {
     const R = await detect({ noCache: query.nocache === '1' });
     if (path === '/json') {
@@ -1232,7 +1250,7 @@ async function handleEvent() {
 
 if (typeof module !== 'undefined' && module.exports && typeof $done === 'undefined') {
   // 供 test/ 下的离线测试使用
-  module.exports = { parseArgs, usageCode, riskScore, summarize, normalizeRec, mergeGeo, placeShort, placeFull, maskIP, isPrivate, lines, renderHTML, titleText, OPT, SOURCES, PROBES };
+  module.exports = { parseArgs, usageCode, riskScore, summarize, normalizeRec, mergeGeo, placePanel, placeFull, ispShort, maskIP, isPrivate, lines, renderHTML, titleText, OPT, SOURCES, PROBES };
 } else {
   const type = typeof $script !== 'undefined' && $script.type;
   if (typeof $request !== 'undefined' && type !== 'generic') handleReport();
