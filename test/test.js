@@ -58,14 +58,28 @@ test('风险分级', () => {
 });
 
 test('地址与 IP 显示', () => {
-  assert.strictEqual(S.placeShort({ cc: 'CN', country: '中国', region: '广东', city: '广州市' }), '🇨🇳 广东 广州市');
-  assert.strictEqual(S.placeShort({ cc: 'HK', country: '香港', region: '香港', city: '香港' }), '🇭🇰 香港');
-  assert.strictEqual(S.placeShort({ cc: 'CN', country: '中国', region: '北京市', city: '北京' }), '🇨🇳 北京市');
+  assert.strictEqual(S.placePanel({ cc: 'CN', country: '中国', region: '广东', city: '广州市' }), '广东 广州市');
+  assert.strictEqual(S.placePanel({ cc: 'CN', country: '中国', region: '北京市', city: '北京' }), '北京市');
+  assert.strictEqual(S.placePanel({ cc: 'HK', country: '香港', region: '香港', city: '香港' }), '香港');
+  assert.strictEqual(S.placePanel({ cc: 'US', country: '美国', region: '得克萨斯州', city: 'Gardendale' }), '美国 得克萨斯州');
+  assert.strictEqual(S.placePanel({ cc: 'JP' }), '日本');
   assert.strictEqual(S.placeFull({ cc: 'US', country: '美国', region: '内华达州', city: '拉斯维加斯' }), '🇺🇸 美国 内华达州 拉斯维加斯');
   assert.strictEqual(S.maskIP('203.0.113.10'), '203.0.*.*');
   assert.strictEqual(S.maskIP('2001:db8:1:2::1'), '2001:db8:*');
   assert.ok(S.isPrivate('192.168.1.1') && S.isPrivate('198.18.0.5') && S.isPrivate('fd00::1'));
   assert.ok(!S.isPrivate('203.0.113.10'));
+});
+
+test('运营商简称', () => {
+  assert.strictEqual(S.ispShort({ isp: 'NetWest Online, Inc.' }), 'NetWest');
+  assert.strictEqual(S.ispShort({ isp: 'Cox Communications Inc.' }), 'Cox');
+  assert.strictEqual(S.ispShort({ isp: 'China Mobile communications corporation' }), 'China Mobile');
+  assert.strictEqual(S.ispShort({ isp: 'Google LLC' }), 'Google');
+  assert.strictEqual(S.ispShort({ isp: 'Example Cable' }), 'Example Cable');
+  assert.strictEqual(S.ispShort({ asn: 'AS9808' }), '移动');
+  assert.strictEqual(S.ispShort({ asn: 'AS4809' }), '电信 CN2');
+  assert.strictEqual(S.ispShort({ asn: 'AS45090' }), '腾讯云');
+  assert.strictEqual(S.ispShort({ ispCN: '联通' }), '联通');
 });
 
 test('数据源解析：IPinfo / IPLocate / proxycheck / IP2Location / ipquery', async () => {
@@ -185,11 +199,18 @@ test('面板文本与网页报告', () => {
     quality: S.summarize(IP, recs, { cc: 'US', src: 'RIPEstat' }),
   };
   const L = S.lines(R);
-  assert.ok(L[0].startsWith('本地：203.0.113.1 🇨🇳 广东 茂名 中国移动 · 蜂窝 中国移动 5G'), L[0]);
-  assert.ok(L[1].includes('腾讯云') && L[1].includes('DNS 另有 1 个'), L[1]);
-  assert.ok(L[2].startsWith('入口2：198.51.100.3 🇭🇰 香港 香港电讯 HKT'), L[2]);
-  assert.ok(L.includes('执行：FINAL ➜ Proxy ➜ US-01（共 2 个节点）'), L.join('\n'));
-  assert.ok(L.some(l => l.startsWith('类型：原生IP（注册 US/使用 US）· 家宽 1/1')), L.join('\n'));
+  const SP = '　';
+  assert.deepStrictEqual(L.slice(0, 7), [
+    `本地${SP}203.0.113.1${SP}广东 茂名 · 移动`,
+    `入口${SP}203.0.113.2${SP}广东 广州 · 腾讯云`,
+    `${SP}${SP}${SP}198.51.100.3${SP}香港 · 香港电讯 HKT`,
+    `${SP}${SP}${SP}DNS 另有 1 个备选地址`,
+    `落地${SP}203.0.113.10${SP}美国 内华达州 · Example Cable`,
+    `策略${SP}Proxy ➜ US-01（共 2 个节点）`,
+    `评分${SP}A 3`,
+  ]);
+  assert.ok(L[7].startsWith(`因子${SP}1 库均未命中 · `) && L[7].endsWith(' · 1.2s'), L[7]);
+  assert.strictEqual(L.length, 8);
   assert.strictEqual(S.titleText(R), '🇺🇸 原生IP · 家宽 · 低风险');
 
   const html = S.renderHTML(R);
@@ -197,7 +218,15 @@ test('面板文本与网页报告', () => {
   assert.ok(html.includes('备选入口1'));
   assert.ok(!/undefined|NaN/.test(html), 'HTML 里不应出现 undefined/NaN');
 
+  assert.ok(html.includes('FINAL ➜ Proxy ➜ US-01'), '报告里的执行路径带规则');
+
   S.OPT.mask = true;
   assert.ok(!S.renderHTML(R).includes(IP));
   S.OPT.mask = false;
+
+  // 隐藏本地：面板和报告都不出现本地 IP 与位置
+  const H = Object.assign({}, R, { local: { hidden: true }, net: { hidden: true } });
+  assert.ok(!S.lines(H).some(l => l.startsWith('本地')));
+  const hh = S.renderHTML(H);
+  assert.ok(!hh.includes('203.0.113.1<') && !hh.includes('<th>本地</th>') && !hh.includes('<th>内网</th>'));
 });
